@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>紫鸟 FBA 重测控制台</title>
+<style>
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --line: #e4e8ef; --text: #1f2329;
+    --muted: #6b7280; --blue: #2563eb; --green: #15a05a; --red: #e0413b;
+    --amber: #d98a00; --shadow: 0 1px 3px rgba(16,24,40,.08);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 18px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .b-idle { background: #eef1f5; color: var(--muted); }
+  .b-running { background: #e7f0ff; color: var(--blue); }
+  .b-paused { background: #fff4e0; color: var(--amber); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  @media (max-width: 820px){ .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; box-shadow: var(--shadow); }
+  .card h2 { font-size: 14px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; }
+  .count { font-size: 12px; color: var(--muted); font-weight: 400; }
+
+  label { font-size: 12px; color: var(--muted); display: block; margin: 8px 0 4px; }
+  select, input[type=text], textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    font: inherit; background: #fff; color: var(--text);
+  }
+  textarea { resize: vertical; min-height: 64px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row > * { flex: 1; }
+
+  button {
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+    padding: 8px 14px; border-radius: 8px; font: inherit; cursor: pointer; font-weight: 600;
+  }
+  button:hover { border-color: #c7ced8; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .btn-primary:hover { background: #1d4fd0; }
+  .btn-warn { background: var(--amber); border-color: var(--amber); color: #fff; }
+  .btn-danger { color: var(--red); border-color: #f1c4c2; }
+  .btn-ghost { color: var(--muted); }
+
+  ul { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
+  li {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 7px;
+  }
+  li .sku { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+  li .meta { font-size: 12px; color: var(--muted); }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; }
+  .tag-ok { background: #e7f7ee; color: var(--green); }
+  .tag-err { background: #fdecea; color: var(--red); }
+  .x { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; }
+  .x:hover { color: var(--red); }
+
+  .now { font-family: ui-monospace, Menlo, monospace; font-weight: 700; color: var(--blue); }
+  .log { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: #0f172a; color: #cbd5e1; border-radius: 8px; padding: 10px; height: 200px; overflow: auto; }
+  .log div { white-space: pre-wrap; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .dot-r { background: var(--red); } .dot-g { background: var(--green); } .dot-b { background: var(--blue); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>紫鸟 FBA 重测控制台</h1>
+      <div class="sub">到"继续"前硬停 · 不自动提交 · 速度可在下方「调速」区调整（防封控）</div>
+    </div>
+    <div>
+      <span id="statusBadge" class="badge b-idle">空闲</span>
+    </div>
+  </header>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row">
+      <button id="startBtn" class="btn-primary">▶ 开始 / 继续</button>
+      <button id="pauseBtn" class="btn-warn">⏸ 暂停</button>
+      <button id="clearBtn" class="btn-ghost">🧹 清空完成/异常</button>
+      <button id="resetBtn" class="btn-danger">🔄 重置队列</button>
+    </div>
+    <div class="hint">暂停后当前 SKU 会回到准备列表队首，下一次"开始"从它重跑。提交动作请到紫鸟浏览器手动点"继续"。</div>
+  </div>
+
+  <div class="grid">
+    <!-- 准备列表 -->
+    <div class="card">
+      <h2>准备列表 <span class="count" id="pendingCount">0</span></h2>
+      <label>批量粘贴（自动识别 X 开头的 FNSKU，一行或多个）</label>
+      <textarea id="bulkText" placeholder="X000000000&#10;X000000001 ..."></textarea>
+      <div class="row" style="margin-top:6px">
+        <button id="bulkBtn">批量加入</button>
+        <input type="text" id="singleSku" placeholder="单个 X000ABCDEF" />
+        <button id="addBtn">加入</button>
+      </div>
+      <ul id="pendingList" style="margin-top:10px"></ul>
+    </div>
+
+    <!-- 完成列表 -->
+    <div class="card">
+      <h2>完成列表 <span class="count" id="doneCount">0</span></h2>
+      <div class="hint" style="margin:0 0 8px">状态：<span class="tag tag-ok">提交就绪</span> 请在紫鸟浏览器手动点"继续"提交。</div>
+      <ul id="doneList"></ul>
+      <h2 style="margin-top:14px">异常列表 <span class="count" id="failedCount">0</span></h2>
+      <ul id="failedList"></ul>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- 配置 -->
+    <div class="card">
+      <h2>重测配置</h2>
+      <label>重测原因（套用全部 SKU）</label>
+      <select id="reasonSel">
+        <option>尽管我的包装没有变化，亚马逊的商品测量值却不正确了</option>
+        <option>之前的测量请求返回了错误的值</option>
+        <option>我已经缩减了包装尺寸</option>
+        <option>我已增加了包装尺寸</option>
+      </select>
+      <label>包装类型（套用全部 SKU）</label>
+      <select id="packageSel">
+        <option>塑料袋（聚乙烯塑料袋和铝箔袋等）</option>
+        <option>气泡膜包装</option>
+        <option>硬容器（例如塑料箱、纸板箱或塑料瓶）</option>
+        <option>无外包装，商品裸露（例如，固定在纸板上的无包装的玩具）</option>
+        <option>其他</option>
+      </select>
+      <div class="row" style="margin-top:10px">
+        <button id="saveCfg">保存配置</button>
+      </div>
+      <div class="hint">问题步骤固定为"重新测量和赔偿亚马逊物流配送费用"，自有数据固定选"否"。</div>
+
+      <hr style="border:none;border-top:1px solid var(--line);margin:14px 0">
+      <h2>调速（防封控）</h2>
+      <label>档位（影响步骤等待 + SKU 间隔，立即对下一个 SKU 生效）</label>
+      <select id="presetSel">
+        <option value="conservative">保守 · SKU 间隔 20–40s（最稳）</option>
+        <option value="balanced">均衡 · SKU 间隔 10–20s（推荐）</option>
+        <option value="aggressive">激进 · SKU 间隔 5–10s（有封控风险）</option>
+      </select>
+      <label>自定义 SKU 间隔（秒，留空用档位默认；过快易触风控）</label>
+      <div class="row">
+        <input type="text" id="gapSec" placeholder="如 12" />
+        <button id="applyThrottle">应用调速</button>
+        <button id="resetThrottle" class="btn-ghost">恢复默认</button>
+      </div>
+      <div class="hint" id="throttleHint"></div>
+    </div>
+
+    <!-- 状态 + 日志 -->
+    <div class="card">
+      <h2>当前进行中</h2>
+      <div id="inProgress" class="now">—</div>
+      <h2 style="margin-top:12px">运行日志</h2>
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const STATUS_TEXT = { idle: '空闲', running: '运行中', paused: '已暂停' };
+const STATUS_CLASS = { idle: 'b-idle', running: 'b-running', paused: 'b-paused' };
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : '{}'
+  });
+  return r.json();
+}
+async function getState() { return (await fetch('/api/state')).json(); }
+
+function render(s) {
+  // 状态徽章
+  const b = $('statusBadge');
+  b.textContent = STATUS_TEXT[s.status] || s.status;
+  b.className = 'badge ' + (STATUS_CLASS[s.status] || 'b-idle');
+
+  // 进行中
+  $('inProgress').textContent = s.inProgress ? s.inProgress : '—';
+
+  // 准备
+  $('pendingCount').textContent = s.pending.length;
+  $('pendingList').innerHTML = s.pending.map(x =>
+    `<li><span class="sku">${escapeHtml(x.sku)}</span><button class="x" data-rm="${x.sku}">✕</button></li>`
+  ).join('') || '<li class="meta">（空）</li>';
+  document.querySelectorAll('[data-rm]').forEach(btn =>
+    btn.onclick = () => api('/api/remove', { sku: btn.dataset.rm }).then(refresh));
+
+  // 完成
+  $('doneCount').textContent = s.done.length;
+  $('doneList').innerHTML = s.done.map(x =>
+    `<li><span><span class="sku">${escapeHtml(x.sku)}</span><br><span class="meta">${escapeHtml(x.dims?.size||'')} · ${escapeHtml(x.dims?.weight||'')} · ${escapeHtml(x.dims?.eligible||'')}</span></span><span class="tag tag-ok">提交就绪</span></li>`
+  ).join('') || '<li class="meta">（空）</li>';
+
+  // 异常
+  $('failedCount').textContent = s.failed.length;
+  $('failedList').innerHTML = s.failed.map(x =>
+    `<li><span><span class="sku">${escapeHtml(x.sku)}</span><br><span class="meta">${escapeHtml(x.reason||'')}</span></span><span class="tag tag-err">异常</span></li>`
+  ).join('') || '<li class="meta">（空）</li>';
+
+  // 日志
+  $('log').innerHTML = (s.log || []).map(l => `<div>${escapeHtml(l)}</div>`).join('');
+  $('log').scrollTop = 0;
+
+  // 按钮可用性
+  $('startBtn').disabled = (s.status === 'running');
+  $('pauseBtn').disabled = (s.status !== 'running');
+
+  // 调速控件（正在编辑该控件时不覆盖，避免轮询把下拉/输入抹回旧值）
+  if (s.throttleSelection) {
+    if (document.activeElement !== $('presetSel')) $('presetSel').value = s.throttleSelection.preset || 'conservative';
+    if (document.activeElement !== $('gapSec')) $('gapSec').value = (s.throttleSelection.customGapMin != null) ? (s.throttleSelection.customGapMin / 1000) : '';
+  }
+  if (s.throttle && s.estimate) {
+    const remaining = s.pending.length;
+    const totalMin = remaining > 0 ? Math.max(1, Math.round(remaining * (s.estimate.perSkuSec + s.estimate.gapSec) / 60)) : 0;
+    $('throttleHint').innerHTML =
+      `当前档位：<b>${s.throttle.label}</b> · 步骤等待 ${s.throttle.step.next / 1000}s(下一页)/${s.throttle.step.filled / 1000}s(填表) · ` +
+      `SKU 间隔 ${Math.round(s.throttle.skuGapMin / 1000)}–${Math.round(s.throttle.skuGapMax / 1000)}s · 重试 ${s.throttle.retryWait / 1000}s<br>` +
+      `预估：单 SKU ≈ ${s.estimate.perSkuSec}s；剩余 ${remaining} 个约 ${totalMin} 分钟（已跑完的不计）。`;
+  }
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function refresh() { render(await getState()); }
+
+// 事件
+$('addBtn').onclick = async () => {
+  const v = $('singleSku').value.trim().toUpperCase();
+  if (!v) return;
+  await api('/api/add', { sku: v });
+  $('singleSku').value = ''; refresh();
+};
+$('bulkBtn').onclick = async () => {
+  const t = $('bulkText').value;
+  const r = await api('/api/bulk', { text: t });
+  if (r.added) $('bulkText').value = '';
+  refresh();
+};
+$('saveCfg').onclick = async () => {
+  await api('/api/config', { reasonText: $('reasonSel').value, packageText: $('packageSel').value });
+  alert('配置已保存'); refresh();
+};
+$('startBtn').onclick = () => api('/api/start').then(refresh);
+$('pauseBtn').onclick = () => api('/api/pause').then(refresh);
+$('clearBtn').onclick = () => api('/api/clear').then(refresh);
+$('resetBtn').onclick = () => { if (confirm('确定清空整个队列？(进行中也会停)')) api('/api/reset').then(refresh); };
+
+// 调速
+async function applyThrottle() {
+  const preset = $('presetSel').value;
+  const gap = $('gapSec').value.trim();
+  await api('/api/throttle', { preset, gapSec: gap === '' ? '' : gap });
+  refresh();
+}
+$('applyThrottle').onclick = applyThrottle;
+$('presetSel').onchange = applyThrottle;   // 选择即生效，避免轮询把下拉框覆盖回旧档位
+$('resetThrottle').onclick = async () => {
+  await api('/api/throttle', { preset: 'conservative', resetCustom: true });
+  refresh();
+};
+
+// 轮询
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
