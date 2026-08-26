@@ -50,6 +50,17 @@ node server.js
 - 不要把店铺名称、storeId、FNSKU、Cookie、令牌或代理地址提交到仓库。
 - 不要照搬 `DIRECT`/代理规则。应确认紫鸟浏览器实际出口仍是该店铺配置的预期代理；错误的直连规则可能暴露本机公网出口。
 
+## 平台支持（Windows / macOS / Linux）
+
+紫鸟 CLI（`@ziniao-open/cli`）是 **npm 包，原生跨平台**，Windows 同样可用——并非只有 macOS / Linux 版本。新 Agent 请勿因 `os` 字段或本文档示例而误判「Windows 不支持」。
+
+- **macOS / Linux**：`which ziniao-cli` 或 `npm i -g @ziniao-open/cli`；直接 `node server.js` 或 `bash start.sh`。
+- **Windows**：
+  - 安装 CLI：`npm i -g @ziniao-open/cli`（会生成 `ziniao-cli.cmd` 启动器）。
+  - 启动控制台：在仓库目录执行 `node server.js`；若想用 `start.sh`，请在 **Git Bash** 或 **WSL** 中运行（Windows 原生 cmd / PowerShell 不识别 bash 脚本）。
+  - 若进程启动后报「找不到 ziniao-cli」类错误，请显式设置环境变量 `ZINIAO_CLI=ziniao-cli.cmd` 再启动（脚本在 Windows 上默认也会尝试 `ziniao-cli.cmd`）。
+- 三平台共用同一套环境变量（`ZINIAO_STORE_ID` / `ZINIAO_STORE_NAME` / `ZINIAO_CLI` / `ZINIAO_FBA_URL` / `ZINIAO_FBA_PORT`），换平台无需改代码。
+
 ## 免责声明
 
 仅供在已授权的店铺内、人工监督下使用。请遵守 Amazon 与紫鸟的使用条款，控制提交频率以避免风控。

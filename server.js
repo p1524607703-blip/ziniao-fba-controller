@@ -15,7 +15,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 // 店铺必须显式配置；公开版本不内置任何真实店铺标识。
-const CLI = process.env.ZINIAO_CLI || 'ziniao-cli';
+// 紫鸟 CLI 是 npm 包 @ziniao-open/cli，原生跨平台。Windows 上 npm 全局安装生成 ziniao-cli.cmd 启动器
+const CLI = process.env.ZINIAO_CLI || (process.platform === 'win32' ? 'ziniao-cli.cmd' : 'ziniao-cli');
 const STORE_ID = String(process.env.ZINIAO_STORE_ID || '').trim();
 const STORE_NAME = String(process.env.ZINIAO_STORE_NAME || '').trim();
 const FBA_URL = process.env.ZINIAO_FBA_URL || 'https://sellercentral.amazon.com/help/hub/solution/WF_FBAWeightAndDimensionIssues';
@@ -116,7 +117,8 @@ const randomBetween = (a, b) => Math.floor(a + Math.random() * (b - a));
 function runCli(args, timeout = 60000) {
   return new Promise(resolve => {
     let out = '', err = '';
-    const cp = spawn(CLI, args, { timeout });
+    // Windows 下需 shell 才能解析 .cmd 启动器；macOS/Linux 保持原行为
+    const cp = spawn(CLI, args, { timeout, shell: process.platform === 'win32' });
     cp.stdout.on('data', d => out += d);
     cp.stderr.on('data', d => err += d);
     cp.on('close', code => resolve({ code, out, err }));

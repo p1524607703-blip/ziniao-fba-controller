@@ -6,7 +6,7 @@ metadata:
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]
-  os: [darwin, linux]
+  os: [darwin, linux, win32]
 ---
 
 # 紫鸟 FBA 重测控制台（ziniao-fba-controller）
@@ -23,7 +23,7 @@ metadata:
 
 ## 前置条件（必须满足，否则跑不起来）
 
-1. **macOS / Linux**，已装 **Node 16+**。
+1. **macOS / Linux / Windows**，已装 **Node 16+**。紫鸟 CLI 是 npm 包 `@ziniao-open/cli`，**原生跨平台**，Windows 同样可装可用（并非只有 macOS/Linux 版本）。
 2. **紫鸟浏览器**已安装、已登录目标店铺账号，且在运行中。
 3. **ziniao-cli 已安装并授权**：
    ```bash
@@ -96,6 +96,8 @@ cp "$SKILL_DIR/public/index.html" ~/Documents/fba-controller/public/index.html
 # 2) 启动（后台常驻）
 cd ~/Documents/fba-controller
 node server.js            # 或 bash start.sh（start.sh 含“已在运行则不重复起”的判断）
+#   Windows 用户：直接 `node server.js` 即可；若想用 start.sh，请在 Git Bash / WSL 中运行
+#   （Windows 原生 cmd/PowerShell 不识别 bash 脚本）。若 spawn 找不到命令，设 ZINIAO_CLI=ziniao-cli.cmd。
 
 # 3) 打开控制台
 #    浏览器访问 http://127.0.0.1:8787/
