@@ -5,8 +5,12 @@
 ## 核心特性
 
 - 在**紫鸟浏览器内**逐 SKU 推进 FBA 尺寸/重量重测流程
-- **最高安全约束：到“继续”按钮前硬停，绝不自动点提交**（提交必须人工在紫鸟浏览器里点）
+- **默认硬停在“继续”按钮前**；用户显式解封后才会自动提交（回读到 case ID 才算成功）
+- 采集亚马逊**问题编号（case ID）**并落盘 `submissions.csv` 审计日志
+- 识别**月度额度用尽**（亚马逊每月上限 120 条，用尽后返回无按钮终态页）
+- 陈旧残留页防护：避免把上一条 SKU 的结果当成当前 SKU 的结论
 - 准备/完成双列表 + 开始/暂停开关 + 调速档位（防封控）
+- `export_report.py` 导出结果对账表（与源清单逐条对账，数字不闭合会报错）
 - 零依赖 Node 服务，不依赖任何 Agent / MCP
 - 店铺信息只通过环境变量配置，仓库不包含任何真实店铺标识
 
@@ -29,8 +33,19 @@ node server.js
 | `server.js` | 零依赖 http 服务 + 状态机 + 安全引擎 + REST API |
 | `step-template.js` | 注入页面的单步执行脚本（`__CONFIG__` 由服务端按 SKU 注入） |
 | `start.sh` | 一键后台启动（含“已在运行则不重复起”判断） |
+| `export_report.py` | 结果对账表导出（需 `openpyxl`） |
 | `public/index.html` | 控制面板前端 |
 | `SKILL.md` | WorkBuddy 技能说明与完整文档 |
+| `CHANGELOG.md` | 更新日志 |
+
+### 导出对账表
+
+```bash
+python3 export_report.py \
+  --state  /path/to/fba-controller/state.json \
+  --source ~/Desktop/报销单/2026年9月10日重测.xlsx \
+  --out    ~/Desktop/报销单/FBA重测提交情况-2026-09-10.xlsx
+```
 
 ## 环境变量
 
@@ -41,6 +56,7 @@ node server.js
 | `ZINIAO_STORE_NAME` | 无，必填 | 目标店铺名（`store open --name` 用） |
 | `ZINIAO_FBA_URL` | Amazon FBA 重测页 | 重测流程入口 URL |
 | `ZINIAO_FBA_PORT` | `8787` | 本地控制台端口 |
+| `ZINIAO_ALLOW_SUBMIT` | `0` | 设为 `1` 才允许自动点击“继续”提交；也可运行时 `POST /api/allow-submit {"allow":true}`，**重启后自动复位为关闭** |
 | `ZINIAO_NODE` | 自动探测 PATH | 仅 `start.sh` 使用，指定 node 可执行文件 |
 
 ## 隐私与网络边界

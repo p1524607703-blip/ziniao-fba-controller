@@ -1,4 +1,7 @@
 .DS_Store
 state.json
+submissions.csv
 *.log
 *.pid
+*.bak
+*.bak-*

@@ -2,7 +2,8 @@
   const CONFIG = __CONFIG__;
 
   const normalize = value => String(value || "").replace(/\s+/g, "").trim();
-  const visibleText = value => String(value || "").trim().slice(0, 1800);
+  // 上限放宽到 8000：尺寸/重量信息常排在页面文本靠后位置，原先 1800 会把它切掉导致采集为空
+  const visibleText = value => String(value || "").trim().slice(0, 8000);
 
   if (
     location.protocol === "chrome-error:" ||
@@ -38,16 +39,71 @@
     ...extra
   });
 
-  // 最高优先级安全门：本脚本不存在点击“继续”的代码路径。
-  if (exactButton("继续")) {
-    return response("STOP_BEFORE_CONTINUE", {
-      message: "检测到继续按钮，已停止且未点击"
+  // 读取工作流元数据：亚马逊把"当前步骤名/类型/工作流状态"写在 data-step-attr 上。
+  // 这比文案匹配可靠得多——文案会随版本改，步骤名稳定。
+  let stepName = "";
+  let stepType = "";
+  try {
+    const stepEl = doc.querySelector("[data-step-attr]");
+    const meta = JSON.parse((stepEl && stepEl.getAttribute("data-step-attr")) || "{}");
+    stepName = String(meta.currentStepName || "");
+    stepType = String(meta.currentStepType || "");
+  } catch (e) {}
+
+  // 终态页通常都会写"FNSKU 的详细信息： XXXXXXXXXX"。
+  // 若页面显示的 FNSKU 与当前要处理的不一致，说明这是上一条 SKU 遗留的陈旧残留页，
+  // 绝不能据此判定本条 SKU 的结论（这是"整段 SKU 被误判"的根源）。
+  const shownFnsku = (bodyText.match(/FNSKU\s*的详细信息[：:]\s*([A-Z0-9]{10})/i) || [])[1] || "";
+  const staleResponse = () => response("STALE_PAGE", {
+    message: `页面残留在 ${shownFnsku}，与当前 ${CONFIG.sku} 不一致（陈旧页，需重载）`,
+    shown: shownFnsku
+  });
+  const pageIsStale = !!shownFnsku && normalize(shownFnsku) !== normalize(CONFIG.sku);
+
+  // 终态：亚马逊判定"不符合重新测量资格"。该页没有任何按钮，只展示 FNSKU 当前尺寸。
+  // 旧版仅靠文案(没有资格/不符合条件)判断会漏判 → 误报"页面结构不一致"，把 SKU 标成结构异常。
+  if (stepName.includes("inform_seller_not_eligible_for_re_measurement")) {
+    if (pageIsStale) return staleResponse();
+    return response("NOT_ELIGIBLE", {
+      message: "亚马逊判定该 FNSKU 不符合重新测量资格（终态页，无可用按钮）",
+      step: stepName
+    });
+  }
+
+  // 最高优先级安全门：默认绝不点击“继续”（硬停）。
+  // 仅当服务端显式下发 allowSubmit=true（用户已解封）才点击，并返回 CONTINUE_CLICKED 交服务端回读确认。
+  const continueButton = exactButton("继续");
+  if (continueButton) {
+    if (!CONFIG.allowSubmit) {
+      return response("STOP_BEFORE_CONTINUE", {
+        message: "检测到继续按钮，已停止且未点击（未解封）"
+      });
+    }
+
+    const btnInfo = {
+      text: normalize(continueButton.innerText || continueButton.textContent),
+      id: continueButton.id || "",
+      cls: String(continueButton.className || "").slice(0, 80),
+      type: continueButton.type || ""
+    };
+    continueButton.click();
+    return response("CONTINUE_CLICKED", {
+      message: "已自动点击继续（已解封），等待服务端回读确认",
+      btn: btnInfo
     });
   }
 
   if (bodyText.includes("已创建问题")) {
     return response("ALREADY_SUBMITTED", {
       message: "页面显示申请已经创建，停止当前 FNSKU"
+    });
+  }
+
+  // 无库存页：亚马逊明确拒绝重测（库存低/留作配送/转运中），无需重试，秒判
+  if (bodyText.includes("没有可测量的库存") || /无法.{0,12}执行重新测量/.test(bodyText)) {
+    if (pageIsStale) return staleResponse();
+    return response("NO_INVENTORY", {
+      message: "无可测量库存，亚马逊拒绝重测（待补货后才能重测）"
     });
   }
 

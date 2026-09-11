@@ -1,8 +1,8 @@
 ---
 name: ziniao-fba-controller
-description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（绝不自动提交），带开始/暂停开关、准备/完成双列表、调速档位。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
+description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（用户显式解封后才会自动提交），带开始/暂停开关、准备/完成双列表、调速档位、提交问题编号(case ID)采集、月度额度用尽识别、结果对账表导出。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
 metadata:
-  version: 1.2.1
+  version: 1.3.0
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]
@@ -14,6 +14,33 @@ metadata:
 > 一个本地 Web 控制台，用来在**紫鸟浏览器内**安全地批量驱动 Amazon Seller Central 的
 > 「FBA 重量和尺寸问题重测（remeasure）」流程。核心安全约束：**到“继续”按钮前硬停，绝不自动点提交**；
 > 提交动作只能在紫鸟浏览器里由人工点。带开始/暂停开关、准备/完成双列表、调速（防封控）控件。
+
+## 🚨 排障第一步：先看是不是「月度额度用尽」
+
+**亚马逊 FBA 重测每月上限 120 条。** 额度用尽后，亚马逊**不报错、也不提示"次数用尽"**，
+而是返回一个看起来很正常的**终态页**：
+
+```
+重量和尺寸相关问题
+FNSKU 的详细信息： X004RPPNZR
+包裹尺寸：	11.38 x 5.59 x 4.33 inches
+包裹重量：	1.12 pounds
+```
+
+**整页 0 个 `<button>`、0 个 `<a>` 链接** —— 没有任何"下一页"或"继续"。
+
+> ⚠️ 遇到「页面没有下一步按钮」时，**第一反应应该是额度用尽，不要反复排查渲染/重试**。
+> 文案里完全看不出原因，真实身份藏在 DOM 元数据里：
+> ```js
+> doc.querySelector("[data-step-attr]")  // →
+>   currentStepName  : "inform_seller_not_eligible_for_re_measurement_p4s_usertask"
+>   currentStepType  : "Success"
+>   工作流 status    : "COMPLETE"
+> ```
+> **判定必须用步骤名，不能用文案**（文案会随版本改，步骤名稳定）。
+> 本技能的 `step-template.js` 已内置该识别，命中后返回 `NOT_ELIGIBLE` 并记录页面展示的尺寸/重量。
+
+处理建议：停止跑批，把剩余 SKU 留到**下月额度恢复后**继续，不要把额度耗尽误判成 SKU 质量问题。
 
 ## 这个技能解决什么
 
@@ -82,15 +109,16 @@ metadata:
 
 ## 安装 / 启动（新 Agent 照做即可）
 
-技能目录自带 4 个文件：`server.js`、`step-template.js`、`start.sh`、`public/index.html`
-（**本技能目录 = 本 SKILL.md 所在目录**，新 Agent 可直接读该路径拿到文件）。
+技能目录自带 5 个文件：`server.js`、`step-template.js`、`start.sh`、`public/index.html`、
+`export_report.py`（**本技能目录 = 本 SKILL.md 所在目录**，新 Agent 可直接读该路径拿到文件）。
 把它们复制到任意工作目录（或直接从技能目录跑），然后启动：
 
 ```bash
 # 1) 复制（假设目标工作目录 ~/Documents/fba-controller；SKILL_DIR 换成本技能实际路径）
 SKILL_DIR="<本 SKILL.md 所在目录>"
 mkdir -p ~/Documents/fba-controller/public
-cp "$SKILL_DIR/server.js" "$SKILL_DIR/step-template.js" "$SKILL_DIR/start.sh" ~/Documents/fba-controller/
+cp "$SKILL_DIR/server.js" "$SKILL_DIR/step-template.js" "$SKILL_DIR/start.sh" \
+   "$SKILL_DIR/export_report.py" ~/Documents/fba-controller/
 cp "$SKILL_DIR/public/index.html" ~/Documents/fba-controller/public/index.html
 
 # 2) 启动（后台常驻）
@@ -116,6 +144,53 @@ node server.js            # 或 bash start.sh（start.sh 含“已在运行则�
 4. **开始 / 暂停**：点「开始」逐个跑到“继续”前停；点「暂停」在当前步骤边界停下，当前 SKU 回退到准备列表队首。
 5. **提交**：每个 SKU 停在“继续”前后，去**紫鸟浏览器**核对数据，手动点「继续」提交。
 
+## 提交问题编号（case ID）采集
+
+提交成功后亚马逊会回一句「已创建问题 21984441071」，这个**问题编号是报销/对账的唯一凭证**，
+比页面尺寸更有价值（页面根本不展示尺寸）。
+
+- `server.js` 的 `extractCaseId()` 从可见文本里抓 6 位以上数字，写进 `state.done[].caseId`。
+- 同步落盘到同目录 `submissions.csv`（审计日志：时间 / SKU / 尺寸 / 重量 / 资格 / 结果 / 备注）。
+- **提交后页面会跳走，读不到尺寸**，所以引擎在点击"继续"前先用 `preSubmitDims` 留档。
+
+> 注意：本功能 2026-09-10 才上线，更早的提交记录在 `submissions.csv` 里只有
+> 「页面显示已创建问题」而没有编号（这类在导出表中会明确标注"已提交（编号未采集）"，不会显示为空）。
+
+## 最终提交解封开关（默认关闭）
+
+默认仍是**硬停在"继续"前**。`server.js` 提供 `ALLOW_SUBMIT` 开关，只有显式打开才会自动点击提交：
+
+```bash
+export ZINIAO_ALLOW_SUBMIT=1          # 方式一：启动时
+curl -X POST http://127.0.0.1:8787/api/allow-submit -H 'Content-Type: application/json' -d '{"allow":true}'
+```
+
+配套安全设计：点击后必须**回读到 case ID 才算提交成功**（绝不"点了就算成功"）；
+同一 SKU 有 120s 防重复点击窗口；**重启后开关自动复位为 false**。
+
+> ⚠️ 重启服务后必须先重新 `POST /api/allow-submit {"allow":true}`，否则只填表不提交。
+
+## 结果对账表导出（跑完/暂停后必做）
+
+技能目录自带 `export_report.py`，把 `state.json` 与源 FNSKU 清单逐条对账，产出四页工作簿：
+**汇总 / 已提交成功 / 未提交-待重排 / 异常明细**。
+
+```bash
+python3 export_report.py \
+  --state  /path/to/fba-controller/state.json \
+  --source ~/Desktop/报销单/2026年9月10日重测.xlsx \
+  --out    ~/Desktop/报销单/FBA重测提交情况-2026-09-10.xlsx
+```
+
+脚本内置三条防坑校验，**不要绕过**：
+
+1. 只统计源表里存在的 SKU —— `state.json` 会残留上一批次的记录，不过滤就对不上账。
+2. 出表前自检「已提交 + 异常 + 待处理 == 源表总数」，**不等就直接报错退出**，
+   并打印重复计入的 SKU、从未进队列的 SKU。
+3. case ID 缺失时明确标「已提交（编号未采集）」，不留空。
+
+> Agent 提示词：跑批暂停/结束后，**主动导出这张表并交付给用户**，不要只口头汇报数字。
+
 ## 安全模型（务必遵守，避免触发 Amazon 封控）
 
 - **绝不自动提交**：脚本最高优先级门是“检测到‘继续’按钮立即停、不点击”。
@@ -126,22 +201,50 @@ node server.js            # 或 bash start.sh（start.sh 含“已在运行则�
 
 ## 已知问题 & 已修复
 
+- **🔴 月度额度用尽被误判成「页面结构不一致」**（最坑的一个）：
+  额度用尽时亚马逊返回的终态页既没有"没有资格"文案、也没有任何按钮，旧版只看文案 → 漏判 →
+  落到兜底分支报"结构不符"。**已修复**：改读工作流步骤名 `[data-step-attr] → currentStepName`，
+  命中 `inform_seller_not_eligible_for_re_measurement` 即判 `NOT_ELIGIBLE`。详见文首排障章节。
+
+- **🔴 上一条 SKU 的终态页被当成当前 SKU 的结论**（曾导致整段 SKU 被误判）：
+  旧的就绪判断是"页面有内容就算就绪"，而上一条的终态页同样"有内容"，于是本条一开工就读到上一条的结论。
+  **已修复**，三道闸门：
+  1. 就绪探测改为必须确认**起始步骤** `obtain_fnsku_for_us_...` 才开工，否则强制 `location.reload()`（≤3 次）；
+  2. 终态页必须校验页面上的 `FNSKU 的详细信息：XXXXXXXXXX` 与当前处理的 SKU 一致，
+     不一致 → 返回 `STALE_PAGE`，服务端重载重来（≤3 次）；
+  3. **数据完整性闸门**：若某 SKU 从未点过"继续"（无 `submitClicks` 记录）却出现成功页，
+     判定为残留页，重载重来，**绝不记成"提交成功"**（否则会虚增成功数并串 case 号）。
+
 - **“页面结构与已知 FBA 重测流程不一致”（UNEXPECTED_STATE）误判**：
   紫鸟向导 `spl-workflow → iframe → contentDocument` 渲染有延迟。每个 SKU 导航后若第一次
   `pageExec` 跑太早，页面还没渲染出可识别步骤文字，会命中脚本兜底分支被误判为结构不符。
-  **已修复**：① 导航后固定等 6s 让向导渲染；② `UNEXPECTED_STATE` 改为可重试（≤1 次，每次等 5s）；
-  ③ 脚本里“页面内容几乎为空”归为可重试的等待态。重试后基本都能过，属时序问题而非 SKU 资格问题。
+  **已修复**：① 导航后轮询等待就绪（替代盲等 6s）；② `UNEXPECTED_STATE` 递增退避重试 3 次（5/10/15s），
+  第 2 次起重新做就绪探测；③ "页面内容几乎为空"归为可重试等待态。
+- **连续误判熔断**：连续 4 条同因**基础设施类**失败自动暂停（业务类如"无库存"不触发，因为那本来就会连续出现）。
 - **store open 不返回 targetId**：改为用 `zclaw invoke visit_page` 拿 `data.data.targetId`。
 - **page exec 返回被信封包裹**：结果在 `data.data.result` 字符串里，需二次解析。
+- **队列数据质量**：复原 SKU 时务必**同时从 `failed` 和 `pending` 去重**，否则同一 SKU 重复计数，
+  对账时表现为总数大于源表。`export_report.py` 会帮你抓出来。
 
 ## 代码要点（便于排错）
 
 - `server.js`：零依赖 http 服务 + 状态机 + 安全引擎 + REST API（`/api/state`、`/api/add`、`/api/bulk`、
-  `/api/start`、`/api/pause`、`/api/clear`、`/api/reset`、`/api/config`、`/api/throttle`）+ 静态前端。
+  `/api/start`、`/api/pause`、`/api/clear`、`/api/reset`、`/api/config`、`/api/throttle`、
+  `/api/allow-submit`）+ 静态前端。
 - `step-template.js`：`__CONFIG__` 占位符由服务端按 SKU 注入，注入页面执行；返回 JSON 状态驱动引擎。
+- `export_report.py`：结果对账表导出（依赖 `openpyxl`）。
 - 引擎状态机：`FNSKU_FILLED → NEXT_CLICKED → OPTION_SELECTED → OWN_DATA_NO_SELECTED →
-  NEED_REASON/NEED_PACKAGE_TYPE → STOP_BEFORE_CONTINUE（硬停）`；异常态 `UNEXPECTED_STATE`/
-  `TECHNICAL_ERROR`/`NOT_ELIGIBLE`/`INVALID_FNSKU`/`OPTION_NOT_FOUND` 按策略重试或标记失败。
+  NEED_REASON/NEED_PACKAGE_TYPE → CONTINUE_CLICKED（仅解封后） → ALREADY_SUBMITTED`。
+- 终态/异常态一览：
+  | 状态 | 含义 | 处理 |
+  |---|---|---|
+  | `ALREADY_SUBMITTED` | 页面显示"已创建问题" → 成功 | 记 case ID，完成 |
+  | `NOT_ELIGIBLE` | 步骤名=不符合重测资格（**多为额度用尽**） | 记失败，留档页面尺寸/重量 |
+  | `NO_INVENTORY` | 无可测量库存（待补货） | 记失败，零重试 |
+  | `STALE_PAGE` | 页面残留上一条的结果 | 强制重载重来（≤3 次） |
+  | `UNEXPECTED_STATE` | 结构未识别 | 递增退避重试 3 次 |
+  | `TECHNICAL_ERROR` | 网络/错误页 | 等 30–60s 重试（≤3 次） |
+  | `STOP_BEFORE_CONTINUE` | 停在"继续"前（未解封） | 硬停，等人工 |
 
 ## 换店铺 / 复用
 

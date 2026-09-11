@@ -14,23 +14,25 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-// 店铺必须显式配置；公开版本不内置任何真实店铺标识。
+// 店铺/CLI 通过环境变量配置，便于不同店铺与环境复用本脚本。
+// 公开版本不内置任何真实店铺标识——店铺名与 storeId 必须显式提供，缺失直接拒绝启动。
 // 紫鸟 CLI 是 npm 包 @ziniao-open/cli，原生跨平台。Windows 上 npm 全局安装生成 ziniao-cli.cmd 启动器
 const CLI = process.env.ZINIAO_CLI || (process.platform === 'win32' ? 'ziniao-cli.cmd' : 'ziniao-cli');
-const STORE_ID = String(process.env.ZINIAO_STORE_ID || '').trim();
-const STORE_NAME = String(process.env.ZINIAO_STORE_NAME || '').trim();
-const FBA_URL = process.env.ZINIAO_FBA_URL || 'https://sellercentral.amazon.com/help/hub/solution/WF_FBAWeightAndDimensionIssues';
-const PORT = Number.parseInt(process.env.ZINIAO_FBA_PORT || '8787', 10);
-const STATE_FILE = path.join(__dirname, 'state.json');
+const STORE_ID = (process.env.ZINIAO_STORE_ID || '').trim();
+const STORE_NAME = (process.env.ZINIAO_STORE_NAME || '').trim();
 
-if (!/^\d+$/.test(STORE_ID) || !STORE_NAME) {
-  console.error('启动失败：请设置有效的 ZINIAO_STORE_ID 和 ZINIAO_STORE_NAME。');
+if (!STORE_ID || !STORE_NAME) {
+  console.error('✗ 缺少店铺配置：请设置 ZINIAO_STORE_ID 与 ZINIAO_STORE_NAME 后重新启动。');
+  console.error('  示例: ZINIAO_STORE_ID=你的storeId ZINIAO_STORE_NAME="你的店铺名" node server.js');
   process.exit(1);
 }
-if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
-  console.error('启动失败：ZINIAO_FBA_PORT 必须是 1–65535 的端口号。');
-  process.exit(1);
-}
+const FBA_URL = process.env.ZINIAO_FBA_URL || 'https://sellercentral.amazon.com/help/hub/solution/WF_FBAWeightAndDimensionIssues';
+const PORT = Number(process.env.ZINIAO_FBA_PORT || 8787);
+const STATE_FILE = path.join(__dirname, 'state.json');
+// 解封开关：默认 false（硬停于"继续"前，绝不自动提交）。用户显式解封后才允许自动点击。
+let ALLOW_SUBMIT = /^(1|true|yes)$/i.test(String(process.env.ZINIAO_ALLOW_SUBMIT || ''));
+const SUBMIT_CLICK_WINDOW = 120000; // 同一 SKU 点击"继续"后的防重复窗口(ms)
+const AUDIT_FILE = path.join(__dirname, 'submissions.csv');
 
 // ---- 注入页面的单步脚本模板（CONFIG 由服务端按 SKU 注入）----
 const STEP_TEMPLATE = fs.readFileSync(path.join(__dirname, 'step-template.js'), 'utf8');
@@ -77,6 +79,8 @@ let state = {
   config: { ...defaultConfig },
   throttle: { preset: 'conservative', customGapMin: null, customGapMax: null },
   lastTargetId: null,
+  submitClicks: {},        // 防重复提交：sku -> 点击"继续"的时间戳
+  preSubmitDims: {},       // 审计：sku -> 点击"继续"前页面上的尺寸/重量（提交后页面会跳走，须提前留档）
   log: []
 };
 
@@ -94,20 +98,33 @@ function loadState() {
 }
 function saveState() {
   try {
-    fs.writeFileSync(
-      STATE_FILE,
-      JSON.stringify({
-        pending: state.pending, done: state.done, failed: state.failed, config: state.config, throttle: state.throttle
-      }, null, 2),
-      { encoding: 'utf8', mode: 0o600 }
-    );
-    fs.chmodSync(STATE_FILE, 0o600);
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      pending: state.pending, done: state.done, failed: state.failed, config: state.config, throttle: state.throttle
+    }, null, 2));
   } catch (e) {}
 }
 function pushLog(msg) {
   const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   state.log.unshift(`[${t}] ${msg}`);
   if (state.log.length > 200) state.log.length = 200;
+}
+
+// 该 SKU 是否刚点过"继续"（窗口内禁止重复点击）
+function recentSubmitClick(sku) {
+  const t = state.submitClicks[sku];
+  return t ? (Date.now() - t < SUBMIT_CLICK_WINDOW) : false;
+}
+
+// 提交审计日志：每个 SKU 的提交/停驻都留痕，便于事后核对与申诉
+function auditLog(row) {
+  try {
+    if (!fs.existsSync(AUDIT_FILE)) {
+      fs.writeFileSync(AUDIT_FILE, 'time,sku,size,weight,eligible,result,note\n', 'utf8');
+    }
+    const line = [row.time, row.sku, row.size, row.weight, row.eligible, row.result, row.note]
+      .map(v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"').join(',') + '\n';
+    fs.appendFileSync(AUDIT_FILE, line, 'utf8');
+  } catch (e) {}
 }
 
 // ---- 工具 ----
@@ -147,11 +164,20 @@ function parseExecResult(s) {
 }
 
 function extractDimensions(t) {
-  const size = (t.match(/包裹尺寸[：:]\s*([^\n]+)/) || [])[1]?.trim() || '';
-  const weight = (t.match(/包裹重量[：:]\s*([^\n]+)/) || [])[1]?.trim() || '';
+  // 中文优先，兼容英文页面
+  const mSize = t.match(/包裹尺寸[：:]\s*([^\n]+)/) || t.match(/Package\s*dimensions?\s*[：:]?\s*([^\n]+)/i);
+  const mWeight = t.match(/包裹重量[：:]\s*([^\n]+)/) || t.match(/(?:Package|Item)\s*weight\s*[：:]?\s*([^\n]+)/i);
+  const size = (mSize || [])[1]?.trim() || '';
+  const weight = (mWeight || [])[1]?.trim() || '';
   const eligible = /您有资格提交/.test(t) ? '有资格'
     : (/没有资格|不符合条件/.test(t) ? '无资格' : '未知');
   return { size, weight, eligible };
+}
+
+// 提交成功页会给出亚马逊问题编号(case id)，如"已创建问题 21984441071"，用于报销/追踪对账
+function extractCaseId(t) {
+  const m = t.match(/已创建问题\s*(\d{6,})/) || t.match(/(?:case|问题)\s*(?:id|编号)?\s*[:#]?\s*(\d{6,})/i);
+  return m ? m[1] : '';
 }
 
 async function resolveTarget() {
@@ -187,6 +213,66 @@ async function pageExec(targetId, script) {
   return parseExecResult(r.out);
 }
 
+// 就绪探测：轮询等待 FBA 向导 iframe 真正渲染完成。
+// 盲等固定秒数在冷启动/慢渲染(如长时间空闲后首次运行)时会把"还没渲染好"误判成"结构不符"，
+// 从而把整批 SKU 打成失败。这里改成"探测到就绪才走"，既更快(就绪即走)也更稳。
+// 探测内容必须足以判断"是不是干净起点"：仅"有内容"不够——
+// 上一条 SKU 的终态页(成功/不符合资格)同样"有内容"，会被误当成就绪，
+// 于是本条的判定直接读到上一条的终态，把正常 SKU 错报成"不符合资格"。
+const READY_PROBE = `(() => {
+  try {
+    const host = document.querySelector("spl-workflow");
+    const frame = host && host.shadowRoot && host.shadowRoot.querySelector("iframe");
+    const doc = frame && frame.contentDocument;
+    if (!doc || !doc.body) return JSON.stringify({status:"NOT_READY", why:"iframe未加载"});
+    const t = String(doc.body.innerText || "").trim();
+    if (t.length < 20) return JSON.stringify({status:"NOT_READY", why:"内容为空"});
+    let stepName = "";
+    try {
+      const el = doc.querySelector("[data-step-attr]");
+      stepName = JSON.parse((el && el.getAttribute("data-step-attr")) || "{}").currentStepName || "";
+    } catch (e) {}
+    const inp = doc.querySelector("#item_input");
+    return JSON.stringify({ status:"OK", stepName, hasInput: !!inp, inputVal: inp ? String(inp.value || "") : "" });
+  } catch (e) { return JSON.stringify({status:"NOT_READY", why:String(e).slice(0,80)}); }
+})()`;
+
+// 起始步骤名（表单要求输入 FNSKU）
+const INITIAL_STEP_RE = /obtain_fnsku/i;
+
+// 强制重载当前页，用于把"上一条 SKU 遗留的终态"刷回干净起点
+async function reloadPage(targetId) {
+  await pageExec(targetId, 'setTimeout(() => location.reload(), 0); "reloading"');
+}
+
+async function waitWorkflowReady(targetId, sku, maxMs = 90000) {
+  const started = Date.now();
+  let tries = 0;
+  let reloads = 0;
+  while (Date.now() - started < maxMs) {
+    if (state.pauseRequested) return false;
+    const res = await pageExec(targetId, READY_PROBE);
+    tries++;
+    if (res && res.status === 'OK') {
+      if (INITIAL_STEP_RE.test(res.stepName || '')) {
+        pushLog(`✓ ${sku} 向导就绪(起始步骤, ${Math.round((Date.now() - started) / 1000)}s / 探测${tries}次)`);
+        return true;
+      }
+      // 停在终态/中间步骤 → 浏览器未拿到干净起点，强制重载再来
+      if (reloads < 3) {
+        reloads++;
+        pushLog(`↻ ${sku} 页面停留在非起始步骤(${(res.stepName || '未知').slice(0, 46)})，强制重载(${reloads}/3)…`);
+        await reloadPage(targetId);
+        await sleepWithPause(6000);
+        continue;
+      }
+    }
+    await sleepWithPause(2500);
+  }
+  pushLog(`⚠️ ${sku} 等待向导就绪超时(${Math.round(maxMs / 1000)}s)`);
+  return false;
+}
+
 // ---- 单 SKU 引擎 ----
 async function processOneSku(sku) {
   const config = {
@@ -200,17 +286,21 @@ async function processOneSku(sku) {
   let targetId = await resolveTarget();
   if (!targetId) { markFailed(sku, '无法解析店铺标签页 targetId（紫鸟浏览器可能未就绪）'); return 'failed'; }
 
-  // 导航后稍等紫鸟向导 iframe 充分渲染，避免第一步就误判"结构不符"(向导渲染有延迟的竞态)
+  // 导航后主动探测向导是否渲染完成（替代原先盲等 6s：慢渲染时不够，快渲染时又浪费）
   pushLog(`⏳ ${sku} 等待向导渲染…`);
-  await sleep(6000);
+  await waitWorkflowReady(targetId, sku, 60000);
+  if (state.pauseRequested) { state.status = 'paused'; return 'paused'; }
 
   let techRetries = 0;
   let structRetries = 0;
+  let staleReloads = 0;
   let inner = 0;
 
   while (inner < 80) {
     if (state.pauseRequested) { state.status = 'paused'; pushLog(`⏸ 已暂停于 ${sku}（步骤 ${inner}）`); return 'paused'; }
 
+    // 每轮刷新解封开关：暂停中、或该 SKU 刚点过"继续"，绝不再点击
+    config.allowSubmit = ALLOW_SUBMIT && !state.pauseRequested && !recentSubmitClick(sku);
     const script = STEP_TEMPLATE.replace('__CONFIG__', JSON.stringify(config));
     const res = await pageExec(targetId, script);
 
@@ -223,28 +313,97 @@ async function processOneSku(sku) {
 
     const st = res.status;
 
+    // 全流程留档：任一步骤页面出现过尺寸/重量就更新审计留档（提交成功后页面会跳走，读不到）
+    if (res.visibleText && /包裹尺寸|包裹重量|package dimension|package weight|item weight/i.test(res.visibleText)) {
+      const d = extractDimensions(res.visibleText);
+      if (d.size || d.weight) state.preSubmitDims[sku] = d;
+    }
+
+    if (st === 'CONTINUE_CLICKED') {
+      // 已解封并点击“继续”：登记防重，等待页面响应后回读确认（绝不“点了就算成功”）
+      state.submitClicks[sku] = Date.now();
+      // 提交后页面会跳走，先把点击前的尺寸/重量留档，供审计使用
+      state.preSubmitDims[sku] = extractDimensions(res.visibleText || '');
+      pushLog(`🚀 ${sku} 已自动点击“继续”，快速回读确认…`);
+      await sleepWithPause(1800);
+      inner++;
+      continue;
+    }
     if (st === 'STOP_BEFORE_CONTINUE') {
       const dims = extractDimensions(res.visibleText || '');
-      state.done.push({ sku, dims, ts: Date.now() });
-      pushLog(`✅ ${sku} 已就绪(停于"继续"前): ${dims.size} / ${dims.weight} / ${dims.eligible} — 请在紫鸟浏览器手动点"继续"提交`);
+      // 已点击过但页面仍停在“继续”前 → 可能未跳转成功，窗口期内继续等待确认
+      if (state.submitClicks[sku] && Date.now() - state.submitClicks[sku] < SUBMIT_CLICK_WINDOW) {
+        pushLog(`⏳ ${sku} 已点击“继续”，页面尚未跳转，继续等待确认…`);
+        await sleepWithPause(1800);
+        inner++;
+        continue;
+      }
+      const clicked = !!state.submitClicks[sku];
+      state.done.push({ sku, dims, ts: Date.now(), submitted: clicked, note: clicked ? '已点击继续但未确认到成功提示' : '未解封，停在继续前' });
+      auditLog({ time: new Date().toISOString(), sku, ...dims, result: clicked ? 'CLICKED_NOT_CONFIRMED' : 'NOT_SUBMITTED', note: clicked ? '已点击继续但未确认成功，需人工核对' : '停于继续前，未提交' });
+      pushLog(`${clicked ? '⚠️' : '⏸'} ${sku} ${clicked ? '已点击继续但未确认成功，请人工核对' : '停于“继续”前(未解封)'}: ${dims.size} / ${dims.weight} / ${dims.eligible}`);
       return 'done';
     }
     if (st === 'ALREADY_SUBMITTED') {
-      state.done.push({ sku, dims: extractDimensions(res.visibleText || ''), ts: Date.now(), note: '页面显示已创建问题' });
-      pushLog(`✅ ${sku} 似乎已提交(页面提示已创建问题)`);
+      // 数据完整性闸门：本 SKU 从未点过"继续"，却看到成功页 →
+      // 极可能是上一条 SKU 遗留的页面，绝不能记成本条"提交成功"（会虚增成功数并串号）。
+      if (!state.submitClicks[sku]) {
+        staleReloads++;
+        if (staleReloads <= 3) {
+          pushLog(`↻ ${sku} 出现成功页但本 SKU 从未点击"继续"，判定为页面残留，强制重载(${staleReloads}/3)`);
+          await reloadPage(targetId);
+          await sleepWithPause(6000);
+          await waitWorkflowReady(targetId, sku, 45000);
+          continue;
+        }
+        markFailed(sku, '页面反复显示非本条的结果，无法确认本条是否已提交（需人工核对）');
+        return 'failed';
+      }
+      // 优先用点击"继续"前留档的尺寸/重量（提交后页面已跳走，读不到）
+      const dims = state.preSubmitDims[sku] || extractDimensions(res.visibleText || '');
+      const caseId = extractCaseId(res.visibleText || '');
+      const note = caseId ? `已创建问题 ${caseId}` : '页面显示已创建问题';
+      state.done.push({ sku, dims, ts: Date.now(), submitted: true, caseId, note });
+      auditLog({ time: new Date().toISOString(), sku, ...dims, result: 'SUBMITTED', note });
+      pushLog(`✅ ${sku} 提交成功${caseId ? '，问题编号 ' + caseId : '（页面显示已创建问题）'}`);
       return 'done';
     }
-    if (st === 'NOT_ELIGIBLE') { markFailed(sku, '该 SKU 无重测资格'); return 'failed'; }
+    if (st === 'NO_INVENTORY') { markFailed(sku, '无可测量库存(库存低/留作配送/转运中)，待补货后才能重测'); return 'failed'; }
+    if (st === 'NOT_ELIGIBLE') {
+      // 终态页虽无按钮，但会展示该 FNSKU 的当前包裹尺寸/重量，一并留档便于核对
+      const dims = extractDimensions(res.visibleText || '');
+      markFailed(sku, res.message || '该 SKU 无重测资格', { dims, step: res.step || '' });
+      if (dims.size || dims.weight) {
+        pushLog(`   ↳ 页面展示的当前尺寸: ${dims.size || '—'} / ${dims.weight || '—'}`);
+      }
+      return 'failed';
+    }
     if (st === 'INVALID_FNSKU') { markFailed(sku, 'FNSKU 格式非法'); return 'failed'; }
     if (st === 'OPTION_NOT_FOUND') { markFailed(sku, `选项未找到: ${res.wanted || ''}`); return 'failed'; }
     if (st === 'NEED_REASON' || st === 'NEED_PACKAGE_TYPE') { markFailed(sku, `缺配置: ${st}`); return 'failed'; }
     if (st === 'NEED_OWN_DATA_DECISION') { markFailed(sku, '需人工决定是否填自有数据'); return 'failed'; }
+    if (st === 'STALE_PAGE') {
+      // 页面仍是上一条 SKU 的残留 → 不是本条的结论。重载拿干净起点后重来。
+      staleReloads++;
+      if (staleReloads <= 3) {
+        pushLog(`↻ ${sku} ${res.message || '页面残留'}，强制重载重试(${staleReloads}/3)`);
+        await reloadPage(targetId);
+        await sleepWithPause(6000);
+        await waitWorkflowReady(targetId, sku, 45000);
+        continue;
+      }
+      markFailed(sku, '页面反复残留上一条结果，无法拿到干净起点'); return 'failed';
+    }
     if (st === 'UNEXPECTED_STATE') {
-      // 多为导航后向导未渲染完的竞态，仅重试 1 次；仍不符才视为真结构问题
+      // 多为导航后向导未渲染完的竞态。递增退避重试 3 次，并在第 2 次起重新做就绪探测，
+      // 避免在一个"根本没渲染出来"的页面上空转到失败。
       structRetries++;
-      if (structRetries <= 1) {
-        pushLog(`${sku} 结构暂未识别(向导可能未渲染完)，等 5s 重试(${structRetries}/1)`);
-        await sleepWithPause(5000);
+      const waits = [5000, 10000, 15000];
+      if (structRetries <= 3) {
+        const w = waits[structRetries - 1];
+        pushLog(`${sku} 结构暂未识别(向导可能未渲染完)，等 ${w / 1000}s 重试(${structRetries}/3)`);
+        await sleepWithPause(w);
+        if (structRetries >= 2) await waitWorkflowReady(targetId, sku, 30000);
         continue;
       }
       markFailed(sku, res.message || '页面结构不符'); return 'failed';
@@ -281,10 +440,30 @@ async function sleepWithPause(ms) {
   }
 }
 
-function markFailed(sku, reason) {
-  state.failed.push({ sku, reason, ts: Date.now() });
+// 熔断：仅对"基础设施类"失败(页面结构/网络/targetId/执行超时)计数。
+// 业务类失败(无库存、无资格)本来就会连续出现，不能触发熔断。
+const INFRA_FAIL_RE = /结构|网络|targetId|exec|步数超限|连续/;
+let consecInfraFail = 0;
+let lastInfraReason = '';
+const FAIL_BREAKER = 4; // 连续 N 条同因基础设施失败即自动暂停
+
+function markFailed(sku, reason, extra = {}) {
+  state.failed.push({ sku, reason, ts: Date.now(), ...extra });
   pushLog(`❌ ${sku} 失败: ${reason}`);
+
+  if (INFRA_FAIL_RE.test(reason || '')) {
+    if (reason === lastInfraReason) consecInfraFail++;
+    else { consecInfraFail = 1; lastInfraReason = reason; }
+
+    if (consecInfraFail >= FAIL_BREAKER) {
+      state.pauseRequested = true;
+      pushLog(`🛑 熔断：连续 ${consecInfraFail} 条因同一基础设施原因失败（${reason}），已自动暂停`);
+      pushLog('   → 请检查紫鸟浏览器/店铺登录态/页面是否还是 FBA 重测向导，确认后再点继续');
+    }
+  }
 }
+
+function resetInfraBreaker() { consecInfraFail = 0; lastInfraReason = ''; }
 
 // ---- 主循环 ----
 let engineRunning = false;
@@ -305,6 +484,7 @@ async function engine() {
 
       const r = await processOneSku(sku);
       state.inProgress = null;
+      if (r === 'done') resetInfraBreaker();
 
       if (r === 'paused') {
         state.pending.unshift({ sku, ts: Date.now() });
@@ -336,32 +516,11 @@ async function engine() {
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css' };
 
 function sendJSON(res, obj) {
-  res.writeHead(200, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store'
-  });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
 }
 
 const server = http.createServer(async (req, res) => {
-  const allowedHosts = new Set([
-    `127.0.0.1:${PORT}`,
-    `localhost:${PORT}`,
-    `[::1]:${PORT}`
-  ]);
-  const allowedOrigins = new Set([
-    `http://127.0.0.1:${PORT}`,
-    `http://localhost:${PORT}`,
-    `http://[::1]:${PORT}`
-  ]);
-  const host = String(req.headers.host || '').toLowerCase();
-  const origin = String(req.headers.origin || '').toLowerCase();
-  if (!allowedHosts.has(host) || (origin && !allowedOrigins.has(origin))) {
-    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('forbidden');
-    return;
-  }
-
   const u = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const p = u.pathname;
 
@@ -372,8 +531,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (p === '/api/state' && req.method === 'GET') {
-    sendJSON(res, { ...state, throttle: getThrottle(), throttleSelection: state.throttle, presets: THROTTLE_PRESETS, estimate: throttleEstimate() });
+  if (p === '/api/state') {
+    sendJSON(res, { ...state, allowSubmit: ALLOW_SUBMIT, throttle: getThrottle(), throttleSelection: state.throttle, presets: THROTTLE_PRESETS, estimate: throttleEstimate() });
     return;
   }
 
@@ -471,6 +630,23 @@ const server = http.createServer(async (req, res) => {
         if (c.resetCustom) { state.throttle.customGapMin = null; state.throttle.customGapMax = null; }
         saveState();
         sendJSON(res, { ok: true, throttle: getThrottle() });
+      } catch (e) { sendJSON(res, { ok: false }); }
+    });
+    return;
+  }
+
+  if (p === '/api/allow-submit' && req.method === 'POST') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const c = JSON.parse(body || '{}');
+        if (typeof c.allow === 'boolean') {
+          ALLOW_SUBMIT = c.allow;
+          pushLog(ALLOW_SUBMIT ? '🔓 已解封：允许自动点击"继续"提交' : '🔒 已重新冻结：停在"继续"前，不自动提交');
+          saveState();
+        }
+        sendJSON(res, { ok: true, allowSubmit: ALLOW_SUBMIT });
       } catch (e) { sendJSON(res, { ok: false }); }
     });
     return;

@@ -100,7 +100,7 @@
     <div class="card">
       <h2>准备列表 <span class="count" id="pendingCount">0</span></h2>
       <label>批量粘贴（自动识别 X 开头的 FNSKU，一行或多个）</label>
-      <textarea id="bulkText" placeholder="X000000000&#10;X000000001 ..."></textarea>
+      <textarea id="bulkText" placeholder="X0025S92KP&#10;X0025RGV1T ..."></textarea>
       <div class="row" style="margin-top:6px">
         <button id="bulkBtn">批量加入</button>
         <input type="text" id="singleSku" placeholder="单个 X000ABCDEF" />
@@ -196,7 +196,7 @@ function render(s) {
   // 准备
   $('pendingCount').textContent = s.pending.length;
   $('pendingList').innerHTML = s.pending.map(x =>
-    `<li><span class="sku">${escapeHtml(x.sku)}</span><button class="x" data-rm="${x.sku}">✕</button></li>`
+    `<li><span class="sku">${x.sku}</span><button class="x" data-rm="${x.sku}">✕</button></li>`
   ).join('') || '<li class="meta">（空）</li>';
   document.querySelectorAll('[data-rm]').forEach(btn =>
     btn.onclick = () => api('/api/remove', { sku: btn.dataset.rm }).then(refresh));
@@ -204,13 +204,13 @@ function render(s) {
   // 完成
   $('doneCount').textContent = s.done.length;
   $('doneList').innerHTML = s.done.map(x =>
-    `<li><span><span class="sku">${escapeHtml(x.sku)}</span><br><span class="meta">${escapeHtml(x.dims?.size||'')} · ${escapeHtml(x.dims?.weight||'')} · ${escapeHtml(x.dims?.eligible||'')}</span></span><span class="tag tag-ok">提交就绪</span></li>`
+    `<li><span><span class="sku">${x.sku}</span><br><span class="meta">${x.dims?.size||''} · ${x.dims?.weight||''} · ${x.dims?.eligible||''}</span></span><span class="tag tag-ok">提交就绪</span></li>`
   ).join('') || '<li class="meta">（空）</li>';
 
   // 异常
   $('failedCount').textContent = s.failed.length;
   $('failedList').innerHTML = s.failed.map(x =>
-    `<li><span><span class="sku">${escapeHtml(x.sku)}</span><br><span class="meta">${escapeHtml(x.reason||'')}</span></span><span class="tag tag-err">异常</span></li>`
+    `<li><span><span class="sku">${x.sku}</span><br><span class="meta">${x.reason||''}</span></span><span class="tag tag-err">异常</span></li>`
   ).join('') || '<li class="meta">（空）</li>';
 
   // 日志
