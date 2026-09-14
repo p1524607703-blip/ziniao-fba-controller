@@ -5,3 +5,5 @@ submissions.csv
 *.pid
 *.bak
 *.bak-*
+__pycache__/
+*.pyc

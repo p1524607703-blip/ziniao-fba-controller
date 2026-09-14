@@ -10,7 +10,7 @@
 - 识别**月度额度用尽**（亚马逊每月上限 120 条，用尽后返回无按钮终态页）
 - 陈旧残留页防护：避免把上一条 SKU 的结果当成当前 SKU 的结论
 - 准备/完成双列表 + 开始/暂停开关 + 调速档位（防封控）
-- `export_report.py` 导出结果对账表（与源清单逐条对账，数字不闭合会报错）
+- `export_report.py` 导出结果对账表（与源清单逐条对账，数字不闭合会报错；自动识别款号列、区分本轮/历史）
 - 零依赖 Node 服务，不依赖任何 Agent / MCP
 - 店铺信息只通过环境变量配置，仓库不包含任何真实店铺标识
 
@@ -43,9 +43,15 @@ node server.js
 ```bash
 python3 export_report.py \
   --state  /path/to/fba-controller/state.json \
-  --source ~/Desktop/报销单/2026年9月10日重测.xlsx \
-  --out    ~/Desktop/报销单/FBA重测提交情况-2026-09-10.xlsx
+  --source ~/Desktop/报销单/ZJ1 重测SKU 9.14.xlsx \
+  --out    ~/Desktop/报销单/ZJ1 重测SKU 2026-09-14.xlsx \
+  --since  2026-09-14
 ```
+
+产出四页工作簿：**汇总 / 已提交成功 / 未提交-待重排 / 异常明细**。
+源表支持单列（A 列 FNSKU）或双列（A 列款号 + B 列 FNSKU，自动识别并带出款号列）。
+`--since` 用于区分「本轮新提交」与「历史已提交」——同一份 `state.json` 里会残留往批记录。
+内置对账自检：已提交 + 异常 + 待处理 ≠ 源表总数时直接报错退出。
 
 ## 环境变量
 

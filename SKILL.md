@@ -2,7 +2,7 @@
 name: ziniao-fba-controller
 description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（用户显式解封后才会自动提交），带开始/暂停开关、准备/完成双列表、调速档位、提交问题编号(case ID)采集、月度额度用尽识别、结果对账表导出。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
 metadata:
-  version: 1.3.0
+  version: 1.3.1
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]
@@ -170,6 +170,23 @@ curl -X POST http://127.0.0.1:8787/api/allow-submit -H 'Content-Type: applicatio
 
 > ⚠️ 重启服务后必须先重新 `POST /api/allow-submit {"allow":true}`，否则只填表不提交。
 
+## 换批次 / 换运营组（做完一组再跑下一组时必读）
+
+`state.json` 是**一个**队列文件，它不区分批次。新一组 SKU 进来时按下面顺序操作，别偷懒：
+
+1. **先停服务** —— 服务运行中直接改 `state.json` 会被内存态覆盖回去（表现为"准备列表为空"）。
+2. **备份旧队列** —— `cp state.json state.<旧运营组>-<日期>.json`。
+   上一组没跑完的待处理 SKU 全在这里面，**这是唯一的存根，务必留**。
+3. 写入新批次队列（`pending` 元素是对象：`{"sku": "...", "ts": <毫秒>}`，不是纯字符串）。
+4. 重启服务，重新 `POST /api/allow-submit`。
+
+> ⚠️ **上一批已提交过的 SKU 不要重复入队**——重复提交既浪费每月 120 条额度，也会被判定为重复。
+> 入队前先拿源表和 `state.done` 求差集。
+
+> ⚠️ **看门狗/熔断脚本必须用「基线法」**：`state.json` 里混着上一批的失败记录，
+> 直接看 `failed` 数组末尾两条，会把**上批的**失败当成**本批**的连续失败而误触发熔断暂停。
+> 正确做法：脚本启动时记下 `base_fail = len(failed)`，之后只看 `failed[base_fail:]`。
+
 ## 结果对账表导出（跑完/暂停后必做）
 
 技能目录自带 `export_report.py`，把 `state.json` 与源 FNSKU 清单逐条对账，产出四页工作簿：
@@ -178,9 +195,30 @@ curl -X POST http://127.0.0.1:8787/api/allow-submit -H 'Content-Type: applicatio
 ```bash
 python3 export_report.py \
   --state  /path/to/fba-controller/state.json \
-  --source ~/Desktop/报销单/2026年9月10日重测.xlsx \
-  --out    ~/Desktop/报销单/FBA重测提交情况-2026-09-10.xlsx
+  --source ~/Desktop/报销单/ZJ1 重测SKU 9.14.xlsx \
+  --out    ~/Desktop/报销单/ZJ1 重测SKU 2026-09-14.xlsx \
+  --since  2026-09-14
 ```
+
+`--since`（可选，北京时间日期）用来切分**本轮新提交**与**历史已提交**：
+一个 `state.json` 里同时躺着几个批次的记录，「已提交 45 条」分不清哪些是这次干的。
+传入后汇总页多出「🚀 本轮新提交」「📦 其中历史已提交」两行，
+「已提交成功」页的历史行会被标成 `—` + 「本轮之前，未重复提交」。**跑新批次时建议都带上。**
+
+**源表两种形态都支持，不用改表**（v1.3.1 起）：
+
+| 形态 | 样子 | 脚本行为 |
+|---|---|---|
+| 单列 | A 列 = FNSKU | 按 A 列读，结果表无款号列 |
+| 双列 | A 列 = 款号，B 列 = FNSKU | 自动探测 FNSKU 列 + **带出款号列**，结果表多一列「款号」 |
+
+探测规则：按 `X[A-Z0-9]{9}` 形态在每列统计命中数，取最高的一列为 FNSKU 列，
+其左边一列即款号列。要强制指定列用 `--column B`。
+
+> 运营看款号比看 FNSKU 直观得多，**源表带款号就一定要带出来**，别只给一串 FNSKU。
+
+**输出文件命名约定**：`<运营组> 重测SKU <日期>.xlsx`（如 `ZJ1 重测SKU 2026-09-14.xlsx`、
+`XH1 重测SKU 2026-09-10.xlsx`），与源表 `ZJ1 重测SKU 9.14.xlsx` 区分开，别覆盖源表。
 
 脚本内置三条防坑校验，**不要绕过**：
 
@@ -188,6 +226,9 @@ python3 export_report.py \
 2. 出表前自检「已提交 + 异常 + 待处理 == 源表总数」，**不等就直接报错退出**，
    并打印重复计入的 SKU、从未进队列的 SKU。
 3. case ID 缺失时明确标「已提交（编号未采集）」，不留空。
+
+**汇总页的「停止原因」是三态动态判定**，别写死：全部处理完 = 「本次已全部处理完毕」；
+还有待处理且无异常 = 「月度额度用尽（推定）」；有异常 = 「存在异常项」。写死会误导用户。
 
 > Agent 提示词：跑批暂停/结束后，**主动导出这张表并交付给用户**，不要只口头汇报数字。
 
