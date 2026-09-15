@@ -11,6 +11,7 @@
 - 陈旧残留页防护：避免把上一条 SKU 的结果当成当前 SKU 的结论
 - 准备/完成双列表 + 开始/暂停开关 + 调速档位（防封控）
 - `export_report.py` 导出结果对账表（与源清单逐条对账，数字不闭合会报错；自动识别款号列、区分本轮/历史）
+- `watch_run.py` 跑批看门狗（连续「不符合资格」→ 自动暂停，补上控制台熔断不覆盖业务失败的缺口）
 - 零依赖 Node 服务，不依赖任何 Agent / MCP
 - 店铺信息只通过环境变量配置，仓库不包含任何真实店铺标识
 
@@ -34,6 +35,7 @@ node server.js
 | `step-template.js` | 注入页面的单步执行脚本（`__CONFIG__` 由服务端按 SKU 注入） |
 | `start.sh` | 一键后台启动（含“已在运行则不重复起”判断） |
 | `export_report.py` | 结果对账表导出（需 `openpyxl`） |
+| `watch_run.py` | 跑批看门狗：连续「不符合资格」自动暂停（额度守卫，需 `python3`，无第三方依赖） |
 | `public/index.html` | 控制面板前端 |
 | `SKILL.md` | WorkBuddy 技能说明与完整文档 |
 | `CHANGELOG.md` | 更新日志 |

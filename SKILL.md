@@ -2,7 +2,7 @@
 name: ziniao-fba-controller
 description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（用户显式解封后才会自动提交），带开始/暂停开关、准备/完成双列表、调速档位、提交问题编号(case ID)采集、月度额度用尽识别、结果对账表导出。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
 metadata:
-  version: 1.3.1
+  version: 1.3.2
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]
@@ -186,6 +186,38 @@ curl -X POST http://127.0.0.1:8787/api/allow-submit -H 'Content-Type: applicatio
 > ⚠️ **看门狗/熔断脚本必须用「基线法」**：`state.json` 里混着上一批的失败记录，
 > 直接看 `failed` 数组末尾两条，会把**上批的**失败当成**本批**的连续失败而误触发熔断暂停。
 > 正确做法：脚本启动时记下 `base_fail = len(failed)`，之后只看 `failed[base_fail:]`。
+
+## 跑批看门狗（长批次必挂）
+
+控制台自带的熔断**只认基础设施类失败**：
+
+```js
+const INFRA_FAIL_RE = /结构|网络|targetId|exec|步数超限|连续/;
+```
+
+而额度用尽返回的「亚马逊判定该 FNSKU 不符合重新测量资格」被归类为**业务失败**，
+**不会触发熔断**。后果：额度真耗尽时，它会一条条把整批（可能上百条）全部跑成失败再收工，
+白白耗掉一两个小时。`watch_run.py` 就是补这个缺口的外挂守护进程。
+
+```bash
+python3 watch_run.py --interval 90 --max-not-eligible 3 --stall-minutes 15 \
+  --out /tmp/watch.log
+```
+
+三重守卫：
+
+| 守卫 | 触发条件 | 动作 |
+|---|---|---|
+| 额度守卫（核心） | 连续 3 条「不符合重新测量资格」 | 自动 `POST /api/pause` 并退出 |
+| 基础设施守卫（兜底） | 连续 5 条基础设施类失败 | 自动暂停 |
+| 停滞守卫 | 15 分钟无任何状态变化 | 只告警，不暂停 |
+
+> ⚠️ 看门狗**必须用基线法**：启动时记录 `base_fail = len(failed)`，之后只看 `failed[base_fail:]`。
+> `state.json` 里混着往批的 failed，直接看数组末尾元素会把**上批失败**当成本批连续失败，
+> 在健康批次上误触发暂停（2026-09-14 实际踩过）。
+
+> ⚠️ 起服务必须用**后台任务方式**（工具的 `run_in_background`），
+> `nohup node server.js &` 在工具调用结束时会被回收掉。
 
 ## 结果对账表导出（跑完/暂停后必做）
 
