@@ -2,7 +2,7 @@
 name: ziniao-fba-controller
 description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（用户显式解封后才会自动提交），带开始/暂停开关、准备/完成双列表、调速档位、提交问题编号(case ID)采集、月度额度用尽识别、结果对账表导出。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
 metadata:
-  version: 1.3.2
+  version: 1.3.3
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]
@@ -186,6 +186,34 @@ curl -X POST http://127.0.0.1:8787/api/allow-submit -H 'Content-Type: applicatio
 > ⚠️ **看门狗/熔断脚本必须用「基线法」**：`state.json` 里混着上一批的失败记录，
 > 直接看 `failed` 数组末尾两条，会把**上批的**失败当成**本批**的连续失败而误触发熔断暂停。
 > 正确做法：脚本启动时记下 `base_fail = len(failed)`，之后只看 `failed[base_fail:]`。
+
+## 断电 / 强关导致丢账（已修复，但要知道原理）
+
+处理每条 SKU 的顺序是「**先出队 → 再处理 → 成功后入 done**」：
+
+```js
+const item = state.pending.shift();   // 先从 pending 摘掉
+state.inProgress = sku;
+saveState();                          // 此刻磁盘上：pending 无它、done 也无它
+const r = await processOneSku(sku);   // 干活（含点击「继续」）
+```
+
+**在这个窗口里断电 / 强杀 / 直接关机**，这条 SKU 磁盘上就彻底消失了——既不在 pending、
+也不在 done，对账时报「源表中从未进队列的 SKU」。而它**可能已经在 Amazon 那边提交成功**，
+于是下次按源表重新入队时会**再提交一次 → 真·重复提交**。
+
+v1.3.3 起的防护：
+
+1. `saveState()` 落盘 `inProgress` + `submitClicks`。
+2. `loadState()` 发现残留 `inProgress` 且该 SKU 不在任何列表 → 计入 `failed`
+   （原因「进程中断：…结果未知…」），**禁止自动重提**，出表后落在「异常明细」页。
+3. 点「继续」前先写 `IN_FLIGHT` 审计行，杀在点击后也能在 `submissions.csv` 里留下痕迹。
+
+> ⚠️ **停机务必走 `POST /api/pause`**，等日志出现「⏸」再关——那样当前这条会走完并落盘。
+> 直接关机 / `kill -9` 就是踩上面那个窗口。宁可多等 40 秒。
+
+> ℹ️ 顺带一提：**跑批途中做对账**，正在处理的那条会因"已出队未入 done"而少 1 条。
+> v1.3.3 起 `export_report.py` 会把它认作「在途」计入闭合，停止原因显示「仍在运行中」。
 
 ## 跑批看门狗（长批次必挂）
 

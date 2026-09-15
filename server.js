@@ -93,13 +93,45 @@ function loadState() {
     state.config = { ...defaultConfig, ...(raw.config || {}) };
     state.throttle = { preset: 'conservative', customGapMin: null, customGapMax: null, ...(raw.throttle || {}) };
     state.status = 'idle'; state.inProgress = null; state.lastTargetId = null;
+    state.submitClicks = raw.submitClicks || {};
+    state.preSubmitDims = {};
+
+    // ---- 崩溃残留恢复（断电 / 强杀 / 关机）----
+    // 若磁盘上留着 inProgress，说明上次是在"已出队、尚未定论"的状态下被打断的。
+    // 这一条的最终结果本地无从得知：可能已提交（Amazon 已生成问题编号），也可能没提交。
+    // 绝不能静默丢弃（会漏账），也绝不能自动重排（可能重复提交）→ 统一计入 failed 中的
+    // "结果未知"类，出表时落在「异常明细」页，交人工去卖家后台核对后再决定。
+    const stale = raw.inProgress ? String(raw.inProgress).trim() : '';
+    const known = state.done.some(x => x.sku === stale)
+               || state.failed.some(x => x.sku === stale)
+               || state.pending.some(x => x.sku === stale);
+    if (stale && !known) {
+      const clicked = !!(raw.submitClicks && raw.submitClicks[stale]);
+      state.failed.push({
+        sku: stale, ts: Date.now(), clicked,
+        reason: clicked
+          ? '进程中断：已点击“继续”但未确认结果（可能已提交，须人工核对问题编号）'
+          : '进程中断：处理到一半未定论（多半未提交，核对后可重提）'
+      });
+      pushLog(`⚠️ 检测到上次中断残留 SKU ${stale}（${clicked ? '已点过继续' : '未点过继续'}）：`
+        + '已计入「异常」并禁止自动重提，请先在卖家后台核对该 FNSKU 是否已生成问题编号');
+    }
+
     pushLog('已加载本地队列：准备 ' + state.pending.length + ' / 完成 ' + state.done.length + ' / 异常 ' + state.failed.length);
   } catch (e) { /* 无文件则使用默认空状态 */ }
 }
 function saveState() {
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify({
-      pending: state.pending, done: state.done, failed: state.failed, config: state.config, throttle: state.throttle
+      pending: state.pending, done: state.done, failed: state.failed,
+      config: state.config, throttle: state.throttle,
+      // ⚠️ 必须落盘：inProgress 记录"当前正在处理哪一条"。
+      // 处理流程是「先出队 → 再处理 → 成功后入 done」，中间若断电/强杀，
+      // 这条就既不在 pending 也不在 done，磁盘上彻底消失（Amazon 那边却可能已生成问题编号）。
+      // 配合 loadState() 的残留恢复逻辑，把这种"结果未知"的条目捞出来，禁止静默重提。
+      inProgress: state.inProgress,
+      // 点过"继续"的时间戳也落盘：崩溃重启后仍能知道"这一条到底点没点过提交"
+      submitClicks: state.submitClicks
     }, null, 2));
   } catch (e) {}
 }
@@ -324,6 +356,14 @@ async function processOneSku(sku) {
       state.submitClicks[sku] = Date.now();
       // 提交后页面会跳走，先把点击前的尺寸/重量留档，供审计使用
       state.preSubmitDims[sku] = extractDimensions(res.visibleText || '');
+      // 先写一条 IN_FLIGHT 审计行再点：万一点完之后进程被杀（断电/强关），
+      // 审计 CSV 里至少留得下"这条点过提交"的痕迹，供事后核对 Amazon 侧是否真的生成了问题编号。
+      auditLog({
+        time: new Date().toISOString(), sku, ...state.preSubmitDims[sku],
+        result: 'IN_FLIGHT',
+        note: '已点击继续，等待回读确认（若此行之后没有对应的 SUBMITTED / CLICKED_NOT_CONFIRMED 行，说明进程被中断，须人工核对是否已生成问题编号）'
+      });
+      saveState();   // 把「已点击」这件事立刻落盘，别等循环末尾
       pushLog(`🚀 ${sku} 已自动点击“继续”，快速回读确认…`);
       await sleepWithPause(1800);
       inner++;

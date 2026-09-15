@@ -119,18 +119,24 @@ def autosize(ws, widths):
 def classify(reason):
     """把失败原因归类成人看得懂的异常类型"""
     r = reason or ''
+    if '进程中断' in r:
+        return '进程中断（结果未知）'
     if '不符合重新测量' in r or '无重测资格' in r:
-        return '额度用尽 / 不符合重测资格'
+        return '不符合重测资格（终态页）'
     if '无可测量库存' in r:
         return '无可测量库存（待补货）'
     if '结构' in r:
-        return '页面结构未识别（疑似同类额度问题）'
+        return '页面结构未识别'
     return '其他'
 
 
 def advice_of(kind):
-    if '额度' in kind:
-        return '下月额度恢复后重试'
+    if '进程中断' in kind:
+        # 崩溃/断电中断的条目：本地无从得知是否已提交，绝不能直接重提（会重复）
+        return '⚠️ 先到卖家后台核对是否已生成问题编号，确认未提交再重提'
+    if '不符合重测' in kind:
+        # 可能是额度用尽，也可能是残留页误读 —— 先用探针法确认，别急着当月放弃
+        return '先用探针法确认额度（跑 1 条看能否推到「继续」）；确认额度可用再重试'
     if '库存' in kind:
         return '补货后再试'
     return '下月额度恢复后重试'
@@ -159,23 +165,35 @@ def main():
     failed = [f for f in s.get('failed', []) if f['sku'] in src_set]
     pending = [p['sku'] for p in s.get('pending', []) if p['sku'] in src_set]
 
+    # ---- 在途（处理中）----
+    # 跑批途中导出快照时，正在处理的那一条已被移出 pending、尚未写入 done，
+    # 若不识别它，对账会凭空少 1 条并误报"从未进队列"（并且这正是崩溃丢账的同一窗口）。
+    inflight = []
+    ip = str(s.get('inProgress') or '').strip()
+    if ip and ip in src_set and ip not in {d['sku'] for d in done} \
+            and ip not in {f['sku'] for f in failed} and ip not in set(pending):
+        inflight = [ip]
+
     # ---- 对账自检：数字必须闭合 ----
     seen, dup = set(), set()
-    for k in [d['sku'] for d in done] + [f['sku'] for f in failed] + pending:
+    for k in [d['sku'] for d in done] + [f['sku'] for f in failed] + pending + inflight:
         (dup if k in seen else seen).add(k)
     missing = [x for x in src if x not in seen]
 
-    print(f'源表 {len(src)} 条 | 已提交 {len(done)} | 异常 {len(failed)} | 待处理 {len(pending)}')
+    print(f'源表 {len(src)} 条 | 已提交 {len(done)} | 异常 {len(failed)} '
+          f'| 待处理 {len(pending)} | 在途 {len(inflight)}')
+    if inflight:
+        print(f'ℹ️ 在途（正在处理，属正常）：{inflight}')
     if dup:
         print(f'⚠️ 重复计入的 SKU（同时出现在多个状态里）: {sorted(dup)}')
     if missing:
         print(f'⚠️ 源表中从未进队列的 SKU: {missing}')
-    total = len(done) + len(failed) + len(pending)
+    total = len(done) + len(failed) + len(pending) + len(inflight)
     if total != len(src):
-        print(f'❌ 对账不闭合：{len(done)}+{len(failed)}+{len(pending)}={total} ≠ 源表 {len(src)}')
+        print(f'❌ 对账不闭合：{len(done)}+{len(failed)}+{len(pending)}+{len(inflight)}={total} ≠ 源表 {len(src)}')
         print('   请先修正 state.json（去重 / 补回遗漏），再重新导出。')
         sys.exit(1)
-    print('✅ 对账闭合')
+    print('✅ 对账闭合' + ('（含 1 条在途，跑完再导一次即为最终版）' if inflight else ''))
 
     n_case = sum(1 for d in done if d.get('caseId'))
 
@@ -205,10 +223,16 @@ def main():
     ws.title = '汇总'
     ts_pool = [d['ts'] for d in done] + [f['ts'] for f in failed]
     last_ts = max(ts_pool) if ts_pool else None
-    if pending and not failed:
+    if inflight:
+        stop_reason = '仍在运行中'
+        stop_note = (f'{inflight[0]} 正在处理（在途，尚未定论）；'
+                     '跑完后再导一次即为最终版')
+    elif pending and not failed:
         stop_reason = '月度额度用尽（推定）'
         stop_note = (f'亚马逊 FBA 重测每月上限约 {MONTHLY_QUOTA} 条；额度用尽后返回'
-                     '「不符合重新测量资格」终态页（页面无任何按钮）')
+                     '「不符合重新测量资格」终态页（页面无任何按钮）。'
+                     '⚠️ 该结论可能被"残留页误读"冒充，建议用探针法确认：'
+                     '解封关闭下跑 1 条，能推到「继续」硬停点即额度仍可用')
     elif not pending and not failed:
         stop_reason = '本次已全部处理完毕'
         stop_note = '无遗留、无异常'
@@ -222,6 +246,8 @@ def main():
         ('⏳ 未提交（待重排）', len(pending),
          '额度恢复后可继续' if pending else '无（本次全部处理完毕）'),
         ('❌ 异常/被拒', len(failed), '见「异常明细」页'),
+        ('🔄 处理中（在途）', len(inflight),
+         f'{inflight[0]} 正在跑，属正常' if inflight else '无'),
         ('', '', ''),
         ('停止原因', stop_reason, stop_note),
         ('本月累计提交', len(done), f'相对每月 {MONTHLY_QUOTA} 条额度（跨批次累计，仅供参考）'),
@@ -240,8 +266,12 @@ def main():
     for row in ws.iter_rows(min_row=2):
         for c in row:
             c.border = BORDER
-    ws['A7'].font = Font(bold=True, color='C00000')
-    ws['B7'].font = Font(bold=True, color='C00000')
+    # 「停止原因」行加粗标红（动态定位，别硬编码行号——插行会错位）
+    for row in ws.iter_rows(min_row=2):
+        if row and row[0].value == '停止原因':
+            row[0].font = Font(bold=True, color='C00000')
+            row[1].font = Font(bold=True, color='C00000')
+            break
     autosize(ws, [22, 18, 74])
 
     # ---------- 已提交成功 ----------
