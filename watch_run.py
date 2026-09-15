@@ -182,15 +182,18 @@ def main():
             s.get('inProgress') or ('运行中' if s.get('status') == 'running' else '已停')))
 
         # ---- 速率（本批平均每条耗时）----
+        # 分母必须用「已处理总数 = 新增成功 + 新增失败」。
+        # 只用成功数当分母时，失败/卡死耗掉的时间不会被摊掉 → 速率被虚增几倍、ETA 假性拖长。
         done_now = len(done)
-        if done_now > base_done:
+        processed = new_done + len(new_fails)
+        if processed > 0:
             spent = time.time() - t_start
-            per = spent / (done_now - base_done)
+            per = spent / processed
             remain = per * (len(pending) + (1 if s.get('inProgress') else 0))
             # ETA 必须跟日志时间戳同一时区（北京），否则同一行里出现两个时区，看着像差 12 小时
             eta = (datetime.datetime.now(datetime.timezone.utc)
                    + datetime.timedelta(hours=8, seconds=remain))
-            say('⏱ 速率 {:.0f}s/条 | 预计剩余 {:.0f} 分钟 | 完成约 {}（北京）'.format(
+            say('⏱ 速率 {:.0f}s/条（均摊·含失败）| 预计剩余 {:.0f} 分钟 | 完成约 {}（北京）'.format(
                 per, remain / 60, eta.strftime('%m-%d %H:%M')))
 
         # ---- 紫鸟 Bridge 健康度（跑批变慢/步数超限的先兆）----
