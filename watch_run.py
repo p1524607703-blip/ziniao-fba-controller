@@ -124,12 +124,21 @@ def main():
         pending = s.get('pending') or []
         done = s.get('done') or []
         failed = s.get('failed') or []
+        if base_fail > len(failed):     # 基线被外部改动越过，跟着下移，否则永远看不到新增失败
+            base_fail = len(failed)
         new_fails = failed[base_fail:]
         new_done = len(done) - base_done
 
         sig = (len(pending), len(done), len(failed))
         if sig != last_sig:
             last_sig, last_change = sig, time.time()
+
+        # 列表被外部改动过（如人工把误伤的条目从 failed 捞回 pending、或重置了状态）：
+        # failed 变短时旧下标会越界/漏检，必须把游标拉回来，否则新失败会被整段忽略。
+        if last_fail_len > len(failed):
+            say('ℹ️ 检测到 failed 列表被外部改动（{} → {}），重置失败游标'.format(
+                last_fail_len, len(failed)))
+            last_fail_len = len(failed)
 
         # 只看基线之后的新增失败，避免把上批失败当本批
         for f in failed[last_fail_len:]:
