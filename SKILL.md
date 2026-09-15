@@ -2,7 +2,7 @@
 name: ziniao-fba-controller
 description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（用户显式解封后才会自动提交），带开始/暂停开关、准备/完成双列表、调速档位、提交问题编号(case ID)采集、月度额度用尽识别、结果对账表导出。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
 metadata:
-  version: 1.3.3
+  version: 1.3.4
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]
@@ -239,6 +239,19 @@ python3 watch_run.py --interval 90 --max-not-eligible 3 --stall-minutes 15 \
 | 额度守卫（核心） | 连续 3 条「不符合重新测量资格」 | 自动 `POST /api/pause` 并退出 |
 | 基础设施守卫（兜底） | 连续 5 条基础设施类失败 | 自动暂停 |
 | 停滞守卫 | 15 分钟无任何状态变化 | 只告警，不暂停 |
+
+每次打点还会输出**速率与 ETA**（北京时区）以及**紫鸟 Bridge 健康度**：
+
+```
+[09-15 09:28:55] 📊 pending=81 | 本批新增成功=1 | 本批新增失败=0 | 当前: X004RR7L0P
+[09-15 09:28:55] ⏱ 速率 60s/条 | 预计剩余 82 分钟 | 完成约 09-15 10:50（北京）
+```
+
+> ⚠️ **Bridge 健康度必须单独探**（`--bridge-url`，默认 `http://127.0.0.1:9481/health`）。
+> Bridge 在负载下会「**端口仍在监听但服务假死**」，CLI 报「无法连接紫鸟浏览器 Bridge」——
+> 这是跑批变慢、`步数超限` 判死的**先兆**，而控制器状态里完全看不出来。
+> 一旦出现「Bridge 响应偏慢」告警，最有效的处置是**重启紫鸟浏览器**，别硬撑。
+> 撑着的代价是单条耗时从 ~50s 涨到 ~4 分钟，还会因空转烧步数丢掉 SKU。
 
 > ⚠️ 看门狗**必须用基线法**：启动时记录 `base_fail = len(failed)`，之后只看 `failed[base_fail:]`。
 > `state.json` 里混着往批的 failed，直接看数组末尾元素会把**上批失败**当成本批连续失败，

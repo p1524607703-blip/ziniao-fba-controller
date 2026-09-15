@@ -71,6 +71,26 @@ def classify(reason):
     return 'OTHER'
 
 
+def bridge_health(url):
+    """探测紫鸟 Bridge 健康度。返回 (ok, 耗时秒, 摘要)。
+
+    Bridge 在负载下会「端口仍在监听但服务假死」——表现为 CLI 报
+    『无法连接紫鸟浏览器 Bridge』。这是跑批变慢（步数超限）的先兆，
+    单看控制器状态看不出来，必须直接探它。
+    """
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(url, timeout=8) as r:
+            d = json.loads(r.read().decode('utf-8'))
+        used = time.time() - t0
+        st = d.get('status') or {}
+        summary = 'loggedIn={} runningStores={}'.format(
+            d.get('loggedIn'), st.get('runningStores'))
+        return bool(d.get('ok')), used, summary
+    except Exception as e:
+        return False, time.time() - t0, str(e)[:60]
+
+
 def main():
     ap = argparse.ArgumentParser(description='FBA 重测跑批看门狗')
     ap.add_argument('--base-url', default='http://127.0.0.1:8787')
@@ -81,6 +101,8 @@ def main():
                     help='连续多少条基础设施失败即暂停（默认 5）')
     ap.add_argument('--stall-minutes', type=int, default=15,
                     help='状态多少分钟无变化则告警（默认 15，只告警）')
+    ap.add_argument('--bridge-url', default='http://127.0.0.1:9481/health',
+                    help='紫鸟 Bridge 健康探测地址（传空串则跳过）')
     ap.add_argument('--out', default=None, help='日志文件（同时输出到 stdout）')
     args = ap.parse_args()
 
@@ -103,6 +125,8 @@ def main():
     base_fail = len(s0.get('failed') or [])
     base_done = len(s0.get('done') or [])
     n_pending0 = len(s0.get('pending') or [])
+    t_start = time.time()
+    bridge_fail = 0
     say('🔍 看门狗启动 | 基线 failed={} done={} | 当前 pending={}'.format(
         base_fail, base_done, n_pending0))
     if n_pending0 == 0:
@@ -156,6 +180,31 @@ def main():
         say('📊 pending={} | 本批新增成功={} | 本批新增失败={} | 当前: {}'.format(
             len(pending), new_done, len(new_fails),
             s.get('inProgress') or ('运行中' if s.get('status') == 'running' else '已停')))
+
+        # ---- 速率（本批平均每条耗时）----
+        done_now = len(done)
+        if done_now > base_done:
+            spent = time.time() - t_start
+            per = spent / (done_now - base_done)
+            remain = per * (len(pending) + (1 if s.get('inProgress') else 0))
+            # ETA 必须跟日志时间戳同一时区（北京），否则同一行里出现两个时区，看着像差 12 小时
+            eta = (datetime.datetime.now(datetime.timezone.utc)
+                   + datetime.timedelta(hours=8, seconds=remain))
+            say('⏱ 速率 {:.0f}s/条 | 预计剩余 {:.0f} 分钟 | 完成约 {}（北京）'.format(
+                per, remain / 60, eta.strftime('%m-%d %H:%M')))
+
+        # ---- 紫鸟 Bridge 健康度（跑批变慢/步数超限的先兆）----
+        if args.bridge_url:
+            b_ok, b_used, b_info = bridge_health(args.bridge_url)
+            if b_ok and b_used > 3:
+                say('⚠️ Bridge 响应偏慢：{:.1f}s（{}）'.format(b_used, b_info))
+            elif not b_ok:
+                bridge_fail += 1
+                say('🔴 Bridge 探测失败（连续 {} 次）：{}'.format(bridge_fail, b_info))
+            else:
+                if bridge_fail:
+                    say('🟢 Bridge 已恢复（此前连续失败 {} 次）'.format(bridge_fail))
+                bridge_fail = 0
 
         if streak_ne >= args.max_not_eligible:
             post(base, '/api/pause')
