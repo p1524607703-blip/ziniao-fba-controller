@@ -2,7 +2,7 @@
 name: ziniao-fba-controller
 description: 本地 Web 控制台，安全驱动「紫鸟 CLI → Amazon Seller Central FBA 重测(remeasure)」。零依赖 Node 服务，逐 SKU 推进到“继续”按钮前硬停（用户显式解封后才会自动提交），带开始/暂停开关、准备/完成双列表、调速档位、提交问题编号(case ID)采集、月度额度用尽识别、结果对账表导出。适用于在紫鸟浏览器内批量重测 FBA 尺寸/重量，且要求使用者显式提供目标店铺配置。
 metadata:
-  version: 1.3.5
+  version: 1.3.6
   targets: [workbuddy]
   requires:
     bins: [ziniao-cli, node]

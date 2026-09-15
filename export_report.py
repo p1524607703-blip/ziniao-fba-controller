@@ -37,7 +37,9 @@ except ImportError:
     sys.exit("缺少依赖 openpyxl，请先安装：pip install openpyxl")
 
 # ---------------------------------------------------------------- 常量
-MONTHLY_QUOTA = 120  # 亚马逊 FBA 重测每月额度上限
+# ⚠️ 「每月 120 条」**不是硬上限**（2026-09-15 实测：9 月自然月累计 154 条提交成功仍能继续）。
+# 保留该常量仅供展示参考；判断额度是否用尽一律用「探针法」，别拿 120 当结论。
+MONTHLY_QUOTA = 120
 
 HDR_FILL = PatternFill('solid', fgColor='1F4E79')
 HDR_FONT = Font(color='FFFFFF', bold=True, size=11)
@@ -130,7 +132,10 @@ def classify(reason):
     return '其他'
 
 
-def advice_of(kind):
+def advice_of(kind, retried=False):
+    # 已经重试过仍被拒的：别再给"去重试"类建议，否则运营会反复试、白耗时间
+    if retried:
+        return '本次已重试仍被拒 → 当月不必再试，留待下月或人工到后台核对'
     if '进程中断' in kind:
         # 崩溃/断电中断的条目：本地无从得知是否已提交，绝不能直接重提（会重复）
         return '⚠️ 先到卖家后台核对是否已生成问题编号，确认未提交再重提'
@@ -139,7 +144,11 @@ def advice_of(kind):
         return '先用探针法确认额度（跑 1 条看能否推到「继续」）；确认额度可用再重试'
     if '库存' in kind:
         return '补货后再试'
-    return '下月额度恢复后重试'
+    if '结构' in kind:
+        # 页面结构异常多半是「上一条 SKU 的残留页」被误读，属可重试类；
+        # 不要套用额度叙事（旧版此处会掉进默认分支给出「下月额度恢复后重试」，误导）
+        return '疑似残留页/结构异常，可重试 1 次；仍失败则人工核对'
+    return '可重试 1 次；仍失败建议人工到后台核对'
 
 
 # ---------------------------------------------------------------- 主流程
@@ -151,11 +160,16 @@ def main():
     ap.add_argument('--since', default=None,
                     help='本轮起始日期 YYYY-MM-DD（北京时间）。传入后自动区分'
                          '「本轮新提交」与「历史已提交」，并标注历史行。')
+    ap.add_argument('--retried', default=None,
+                    help='本次已重试过的 FNSKU（逗号分隔）。命中的异常行会在「建议」列'
+                         '标注「已重试仍被拒」，避免运营反复重试同一条。')
     args = ap.parse_args()
 
     for p in (args.state, args.source):
         if not os.path.exists(p):
             sys.exit(f'文件不存在: {p}')
+
+    retried = {x.strip().upper() for x in (args.retried or '').split(',') if x.strip()}
 
     s = json.load(open(args.state, encoding='utf-8'))
     src, style_map = read_source(args.source)
@@ -196,6 +210,7 @@ def main():
     print('✅ 对账闭合' + ('（含 1 条在途，跑完再导一次即为最终版）' if inflight else ''))
 
     n_case = sum(1 for d in done if d.get('caseId'))
+    n_retry = sum(1 for f in failed if f['sku'] in retried)
 
     # ---- 本轮 vs 历史切分（--since 给出北京时间日期，按天粒度比较）----
     since_ts = None
@@ -228,10 +243,10 @@ def main():
         stop_note = (f'{inflight[0]} 正在处理（在途，尚未定论）；'
                      '跑完后再导一次即为最终版')
     elif pending and not failed:
-        stop_reason = '月度额度用尽（推定）'
-        stop_note = (f'亚马逊 FBA 重测每月上限约 {MONTHLY_QUOTA} 条；额度用尽后返回'
-                     '「不符合重新测量资格」终态页（页面无任何按钮）。'
-                     '⚠️ 该结论可能被"残留页误读"冒充，建议用探针法确认：'
+        stop_reason = '疑似额度用尽（推定）'
+        stop_note = ('剩余条目全部返回「不符合重新测量资格」终态页（页面无任何按钮）。'
+                     '⚠️ 「每月 120 条」并非硬上限（实测 9 月累计已超仍能继续），'
+                     '且该终态页也可能被"残留页误读"冒充 —— 判断一律用探针法：'
                      '解封关闭下跑 1 条，能推到「继续」硬停点即额度仍可用')
     elif not pending and not failed:
         stop_reason = '本次已全部处理完毕'
@@ -246,13 +261,19 @@ def main():
         ('⏳ 未提交（待重排）', len(pending),
          '额度恢复后可继续' if pending else '无（本次全部处理完毕）'),
         ('❌ 异常/被拒', len(failed), '见「异常明细」页'),
+        ('🔁 其中本次已重试', n_retry,
+         '已重跑过一遍仍被亚马逊拒绝（重试前均通过"起始步骤"校验，非残留页误读），当月不必再试'
+         if n_retry else '无'),
         ('🔄 处理中（在途）', len(inflight),
          f'{inflight[0]} 正在跑，属正常' if inflight else '无'),
         ('', '', ''),
         ('停止原因', stop_reason, stop_note),
-        ('本月累计提交', len(done), f'相对每月 {MONTHLY_QUOTA} 条额度（跨批次累计，仅供参考）'),
+        ('本月累计提交', len(done),
+         '跨批次累计；⚠️「每月 120 条」并非硬上限（实测已超仍能继续），'
+         '额度是否用尽须用探针法确认'),
         ('', '', ''),
-        ('最后提交时间(北京)', bj(last_ts), '控制器已暂停，未继续消耗额度'),
+        ('最后提交时间(北京)', bj(last_ts),
+         '仍有待处理项，控制器未再消耗额度' if pending else '队列已跑完'),
     ]
     if since_ts is not None:
         rows += [
@@ -323,7 +344,7 @@ def main():
         kind = classify(f.get('reason'))
         ws.append([i, f['sku']] + ([style_map.get(f['sku'], '')] if style_map else []) + [kind,
                    d.get('size') or '—', d.get('weight') or '—',
-                   bj(f['ts']), advice_of(kind)])
+                   bj(f['ts']), advice_of(kind, f['sku'] in retried)])
     if not failed:
         ws.append(['—', '无'] + ([''] if style_map else []) + ['—', '—', '—', '—', '本次无异常项'])
     style_header(ws)
